@@ -1,15 +1,17 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Linq;
 using System.IO;
 using System.Text.RegularExpressions;
+using System.Globalization;
 using UnityEngine;
 using UnityEditor;
 using UnityEditorInternal;
 
 /// <summary>
-/// Ultimate Animation Object & Property Renamer v2.1
+/// Ultimate Animation Object & Property Renamer v2.2 - Japanese Character Support
+/// Enhanced with Unicode normalization and Japanese character handling
 /// Fixed parsing, discovery, and preview for "OBJECT : Component.SubComponent.PropertyName" format
-/// Author: Ultimate Developer | Optimized for professional workflows
+/// Author: Ultimate Developer | Optimized for professional workflows with Japanese support
 /// </summary>
 public class AnimationObjectPropertyRenamer : EditorWindow
 {
@@ -26,6 +28,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     private static readonly Color ERROR_COLOR = new Color(0.9f, 0.3f, 0.3f);
     private static readonly Color ACCENT_COLOR = new Color(0.3f, 0.7f, 1f);
     private static readonly Color BLEND_SHAPE_COLOR = new Color(0.7f, 0.9f, 1f);
+    private static readonly Color JAPANESE_COLOR = new Color(0.9f, 0.7f, 0.9f);
     #endregion
 
     #region Enums
@@ -33,6 +36,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     public enum BackupStrategy { None, Temporary, Permanent }
     private enum OperationState { Idle, Scanning, Previewing, Processing }
     private enum ValidationResult { Valid, Warning, Error }
+    private enum TextType { Latin, Japanese, Mixed, Other }
     #endregion
 
     #region Serialized State
@@ -42,6 +46,8 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     [SerializeField] private bool caseSensitive = false;
     [SerializeField] private bool autoPreview = true;
     [SerializeField] private bool showAdvanced = false;
+    [SerializeField] private bool enableJapaneseNormalization = true;
+    [SerializeField] private bool showJapaneseHelp = false;
     #endregion
 
     #region UI State
@@ -76,6 +82,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         public string oldPath, newPath, objectName, propertyName, middlePart;
         public ValidationResult validation = ValidationResult.Valid;
         public string validationMessage = "";
+        public TextType textType = TextType.Latin;
 
         public bool WillChange => validation != ValidationResult.Error && oldPath != newPath;
         public bool HasWarning => validation == ValidationResult.Warning;
@@ -88,6 +95,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         public string propertyName = "";
         public bool isValid = false;
         public bool hasObjectSeparator = false; // Tracks if " : " format is used
+        public TextType textType = TextType.Latin;
 
         public string Reconstruct(string newObject = null, string newProperty = null)
         {
@@ -115,13 +123,184 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     }
     #endregion
 
+    #region Japanese Character Support Utilities
+    /// <summary>
+    /// Normalizes Unicode text for consistent comparison (especially important for Japanese)
+    /// </summary>
+    private string NormalizeText(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+
+        if (enableJapaneseNormalization)
+        {
+            try
+            {
+                // Try to normalize to NFC (Canonical Decomposition followed by Canonical Composition)
+                // This handles Japanese combining characters properly
+                return text.Normalize(System.Text.NormalizationForm.FormC);
+            }
+            catch (System.Exception)
+            {
+                // Fallback if normalization is not available in this Unity version
+                return text;
+            }
+        }
+
+        return text;
+    }
+
+    /// <summary>
+    /// Determines the primary character type of the text
+    /// </summary>
+    private TextType DetermineTextType(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return TextType.Latin;
+
+        bool hasHiragana = false;
+        bool hasKatakana = false;
+        bool hasKanji = false;
+        bool hasLatin = false;
+        bool hasOther = false;
+
+        foreach (char c in text)
+        {
+            var unicodeCategory = CharUnicodeInfo.GetUnicodeCategory(c);
+
+            // Check for Japanese character ranges
+            if (c >= 0x3040 && c <= 0x309F) // Hiragana
+                hasHiragana = true;
+            else if (c >= 0x30A0 && c <= 0x30FF) // Katakana
+                hasKatakana = true;
+            else if (c >= 0x4E00 && c <= 0x9FAF) // CJK Unified Ideographs (Kanji)
+                hasKanji = true;
+            else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+                hasLatin = true;
+            else if (unicodeCategory != UnicodeCategory.ConnectorPunctuation &&
+                     unicodeCategory != UnicodeCategory.DashPunctuation &&
+                     unicodeCategory != UnicodeCategory.OtherPunctuation &&
+                     c != '_' && c != '-' && c != '.' && c != ' ')
+                hasOther = true;
+        }
+
+        // Determine primary type
+        if (hasHiragana || hasKatakana || hasKanji)
+        {
+            if (hasLatin) return TextType.Mixed;
+            return TextType.Japanese;
+        }
+        else if (hasLatin)
+        {
+            if (hasOther) return TextType.Mixed;
+            return TextType.Latin;
+        }
+        else
+        {
+            return TextType.Other;
+        }
+    }
+
+    /// <summary>
+    /// Enhanced text comparison that handles Japanese characters properly
+    /// </summary>
+    private bool TextEquals(string text1, string text2, System.StringComparison comparison)
+    {
+        if (string.IsNullOrEmpty(text1) && string.IsNullOrEmpty(text2)) return true;
+        if (string.IsNullOrEmpty(text1) || string.IsNullOrEmpty(text2)) return false;
+
+        // Normalize both texts for proper Japanese character comparison
+        var normalized1 = NormalizeText(text1);
+        var normalized2 = NormalizeText(text2);
+
+        return string.Equals(normalized1, normalized2, comparison);
+    }
+
+    /// <summary>
+    /// Enhanced text contains check for Japanese characters
+    /// </summary>
+    private bool TextContains(string source, string value, System.StringComparison comparison)
+    {
+        if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(value)) return false;
+
+        var normalizedSource = NormalizeText(source);
+        var normalizedValue = NormalizeText(value);
+
+        return normalizedSource.IndexOf(normalizedValue, comparison) >= 0;
+    }
+
+    /// <summary>
+    /// Enhanced text replace that handles Japanese characters
+    /// </summary>
+    private string TextReplace(string source, string oldValue, string newValue, System.StringComparison comparison)
+    {
+        if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(oldValue)) return source;
+
+        var normalizedSource = NormalizeText(source);
+        var normalizedOldValue = NormalizeText(oldValue);
+        var normalizedNewValue = NormalizeText(newValue ?? "");
+
+        if (comparison == System.StringComparison.Ordinal)
+        {
+            return normalizedSource.Replace(normalizedOldValue, normalizedNewValue);
+        }
+        else
+        {
+            // Case-insensitive replace (more complex for Japanese)
+            var index = normalizedSource.IndexOf(normalizedOldValue, comparison);
+            if (index < 0) return source;
+
+            var result = normalizedSource.Remove(index, normalizedOldValue.Length);
+            return result.Insert(index, normalizedNewValue);
+        }
+    }
+
+    /// <summary>
+    /// Validates Japanese text for use in animation property names
+    /// </summary>
+    private ValidationResult ValidateJapaneseText(string text, out string message)
+    {
+        message = "";
+
+        if (string.IsNullOrEmpty(text))
+        {
+            message = "Empty text";
+            return ValidationResult.Error;
+        }
+
+        var textType = DetermineTextType(text);
+
+        // Check for problematic characters in Unity animation system
+        var problematicChars = new char[] { ':', '/', '\\', '<', '>', '|', '?', '*', '"', '\t', '\n', '\r' };
+        if (text.IndexOfAny(problematicChars) >= 0)
+        {
+            message = "Contains invalid characters for Unity animation properties";
+            return ValidationResult.Error;
+        }
+
+        // Warn about potential encoding issues
+        if (textType == TextType.Japanese && !enableJapaneseNormalization)
+        {
+            message = "Japanese text detected - enable normalization for best results";
+            return ValidationResult.Warning;
+        }
+
+        // Check for very long text that might cause issues
+        if (text.Length > 100)
+        {
+            message = "Text is very long - may cause performance issues";
+            return ValidationResult.Warning;
+        }
+
+        return ValidationResult.Valid;
+    }
+    #endregion
+
     #region Menu Integration
-    [MenuItem("Tools/RΩKΔ's Animation Renamer", false, 0)]
+    [MenuItem("Tools/RΩKΔ's Animation Renamer (JP+)", false, 0)]
     public static AnimationObjectPropertyRenamer ShowWindow()
     {
-        var window = GetWindow<AnimationObjectPropertyRenamer>("RΩKΔ's Animation Renamer");
+        var window = GetWindow<AnimationObjectPropertyRenamer>("RΩKΔ's Animation Renamer (JP+)");
         window.minSize = new Vector2(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
-        window.titleContent = new GUIContent("RΩKΔ's Animation Renamer", EditorGUIUtility.IconContent("AnimationClip Icon").image);
+        window.titleContent = new GUIContent("RΩKΔ's Animation Renamer (JP+)", EditorGUIUtility.IconContent("AnimationClip Icon").image);
         window.Show();
         return window;
     }
@@ -132,7 +311,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     [MenuItem("Assets/Rename Animation Objects & Properties", false, 25)]
     private static void ShowFromContextMenu()
     {
-        var window = GetWindow<AnimationObjectPropertyRenamer>("RΩKΔ's Animation Renamer");
+        var window = GetWindow<AnimationObjectPropertyRenamer>("RΩKΔ's Animation Renamer (JP+)");
         window.AddSelectedClipsFromProject();
     }
     #endregion
@@ -165,9 +344,9 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     }
     #endregion
 
-    #region Core Operations - Enhanced Path Parsing
+    #region Core Operations - Enhanced Path Parsing with Japanese Support
     /// <summary>
-    /// Enhanced parsing for "OBJECT : Component.SubComponent.PropertyName" format
+    /// Enhanced parsing for "OBJECT : Component.SubComponent.PropertyName" format with Japanese character support
     /// Also handles root objects and simple paths like "rotation", "Armature/bone.rotation", etc.
     /// </summary>
     private ParsedPath ParseAnimationPath(string path)
@@ -178,6 +357,10 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         {
             return parsed;
         }
+
+        // Normalize the path for proper Japanese character handling
+        path = NormalizeText(path);
+        parsed.textType = DetermineTextType(path);
 
         // Check for the specific format: "OBJECT : Component.SubComponent.PropertyName"
         if (path.Contains(" : "))
@@ -290,13 +473,16 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     }
 
     /// <summary>
-    /// Enhanced property name detection
+    /// Enhanced property name detection with Japanese character support
     /// </summary>
     private bool IsLikelyPropertyName(string text)
     {
         if (string.IsNullOrEmpty(text)) return false;
 
-        // Common property patterns
+        var textType = DetermineTextType(text);
+        var normalizedText = NormalizeText(text);
+
+        // Common property patterns (English)
         var propertyPatterns = new[]
         {
             // Transform properties
@@ -314,7 +500,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
             "look", "open", "close", "left", "right", "up", "down"
         };
 
-        var lowerText = text.ToLower();
+        var lowerText = normalizedText.ToLower();
 
         // Check exact matches or starts with
         foreach (var pattern in propertyPatterns)
@@ -323,54 +509,93 @@ public class AnimationObjectPropertyRenamer : EditorWindow
                 return true;
         }
 
+        // Japanese-specific patterns
+        if (textType == TextType.Japanese || textType == TextType.Mixed)
+        {
+            // Common Japanese blend shape patterns
+            var japanesePropertyPatterns = new[]
+            {
+                // Facial expressions in Japanese
+                "笑顔", "笑い", "ウィンク", "まばたき",
+                "目", "口", "眉", "頬", "鼻",
+                "あ", "い", "う", "え", "お", // Vowel shapes
+                "開く", "閉じる", "上", "下", "左", "右",
+                // Common suffixes
+                "L", "R", "_L", "_R", "左", "右"
+            };
+
+            foreach (var pattern in japanesePropertyPatterns)
+            {
+                if (TextContains(normalizedText, pattern, System.StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            // Check for common Japanese naming patterns
+            // Names ending with directional indicators
+            if (normalizedText.EndsWith("L") || normalizedText.EndsWith("R") ||
+                normalizedText.EndsWith("_L") || normalizedText.EndsWith("_R") ||
+                normalizedText.EndsWith("左") || normalizedText.EndsWith("右"))
+                return true;
+
+            // Names ending with numbers (common in Japanese blend shapes)
+            if (Regex.IsMatch(normalizedText, @"[0-9]+$"))
+                return true;
+        }
+
         // Blend shape patterns (alphanumeric with numbers/L/R at end)
-        if (Regex.IsMatch(text, @"^[a-zA-Z_][a-zA-Z0-9_]*[0-9LRlr]$", RegexOptions.IgnoreCase))
+        if (Regex.IsMatch(normalizedText, @"^[a-zA-Z_\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF][a-zA-Z0-9_\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]*[0-9LRlr]$", RegexOptions.IgnoreCase))
             return true;
 
         // Short property names (1-4 chars, all lowercase or mixed case)
-        if (text.Length <= 4 && (text.All(char.IsLower) || text.Any(char.IsUpper)))
+        if (normalizedText.Length <= 4 && (normalizedText.All(char.IsLower) || normalizedText.Any(char.IsUpper)))
             return true;
 
-        // Camel case properties
-        if (Regex.IsMatch(text, @"^[a-z][a-zA-Z0-9]*$"))
+        // Camel case properties (English)
+        if (textType == TextType.Latin && Regex.IsMatch(normalizedText, @"^[a-z][a-zA-Z0-9]*$"))
+            return true;
+
+        // Japanese character sequences that look like properties
+        if (textType == TextType.Japanese && normalizedText.Length <= 6)
             return true;
 
         return false;
     }
 
     /// <summary>
-    /// Extract clean object name from parsed path
+    /// Extract clean object name from parsed path with Japanese support
     /// </summary>
     private string GetCleanObjectName(ParsedPath parsed)
     {
         if (!parsed.isValid || string.IsNullOrEmpty(parsed.objectName))
             return "";
 
+        var cleanName = NormalizeText(parsed.objectName.Trim());
+
         // For "OBJECT : ..." format, return the object directly
         if (parsed.hasObjectSeparator)
         {
-            return parsed.objectName.Trim();
+            return cleanName;
         }
 
         // For hierarchy paths, get the deepest object
-        if (parsed.objectName.Contains('/'))
+        if (cleanName.Contains('/'))
         {
-            var parts = parsed.objectName.Split('/');
-            return parts[parts.Length - 1];
+            var parts = cleanName.Split('/');
+            return NormalizeText(parts[parts.Length - 1]);
         }
 
-        return parsed.objectName;
+        return cleanName;
     }
 
     /// <summary>
-    /// Extract clean property name from parsed path
+    /// Extract clean property name from parsed path with Japanese support
     /// </summary>
     private string GetCleanPropertyName(ParsedPath parsed)
     {
         if (!parsed.isValid || string.IsNullOrEmpty(parsed.propertyName))
             return "";
 
-        return parsed.propertyName.Trim();
+        return NormalizeText(parsed.propertyName.Trim());
     }
 
     /// <summary>
@@ -378,11 +603,12 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     /// </summary>
     private bool IsBlendShapeProperty(string propertyPath)
     {
-        return propertyPath.Contains("blendShape.")|| propertyPath.Contains("Blend Shape.");
+        var normalizedPath = NormalizeText(propertyPath);
+        return normalizedPath.Contains("blendShape.") || normalizedPath.Contains("Blend Shape.");
     }
     #endregion
 
-    #region Discovery Operations - Mode-Specific with Blend Shape Filtering
+    #region Discovery Operations - Mode-Specific with Blend Shape Filtering and Japanese Support
     private void DiscoverObjects()
     {
         if (selectedClips.Count == 0)
@@ -405,23 +631,26 @@ public class AnimationObjectPropertyRenamer : EditorWindow
 
             foreach (var binding in AnimationUtility.GetCurveBindings(clip))
             {
+                var normalizedPath = NormalizeText(binding.path);
+
                 // Method 1: Direct extraction from " : " format (most reliable for your case)
-                if (binding.path.Contains(" : "))
+                if (normalizedPath.Contains(" : "))
                 {
-                    var colonIndex = binding.path.IndexOf(" : ");
-                    var objectName = binding.path.Substring(0, colonIndex).Trim();
+                    var colonIndex = normalizedPath.IndexOf(" : ");
+                    var objectName = normalizedPath.Substring(0, colonIndex).Trim();
                     if (!string.IsNullOrEmpty(objectName))
                     {
                         discoveredObjects.Add(objectName);
                     }
                 }
                 // Method 2: Hierarchy paths like "Armature/Head"
-                else if (binding.path.Contains("/"))
+                else if (normalizedPath.Contains("/"))
                 {
-                    var parts = binding.path.Split('/');
+                    var parts = normalizedPath.Split('/');
                     foreach (var part in parts)
                     {
                         var cleanPart = part.Split('.')[0]; // Remove property part if exists
+                        cleanPart = NormalizeText(cleanPart);
                         if (!string.IsNullOrEmpty(cleanPart))
                         {
                             discoveredObjects.Add(cleanPart);
@@ -429,15 +658,16 @@ public class AnimationObjectPropertyRenamer : EditorWindow
                     }
                 }
                 // Method 3: Simple root paths (fallback)
-                else if (!binding.path.Contains("."))
+                else if (!normalizedPath.Contains("."))
                 {
-                    discoveredObjects.Add(binding.path);
+                    discoveredObjects.Add(normalizedPath);
                 }
                 // Method 4: Dotted paths - take first part as object
-                else if (binding.path.Contains("."))
+                else if (normalizedPath.Contains("."))
                 {
-                    var firstDotIndex = binding.path.IndexOf('.');
-                    var objectPart = binding.path.Substring(0, firstDotIndex);
+                    var firstDotIndex = normalizedPath.IndexOf('.');
+                    var objectPart = normalizedPath.Substring(0, firstDotIndex);
+                    objectPart = NormalizeText(objectPart);
                     if (!string.IsNullOrEmpty(objectPart))
                     {
                         discoveredObjects.Add(objectPart);
@@ -475,20 +705,24 @@ public class AnimationObjectPropertyRenamer : EditorWindow
 
             foreach (var binding in AnimationUtility.GetCurveBindings(clip))
             {
+                var normalizedPropertyName = NormalizeText(binding.propertyName);
+
                 // Check if this is a blend shape property
-                if (binding.propertyName.StartsWith("blendShape."))
+                if (normalizedPropertyName.StartsWith("blendShape."))
                 {
                     // Extract just the property name after "blendShape."
-                    var cleanPropertyName = binding.propertyName.Substring("blendShape.".Length);
+                    var cleanPropertyName = normalizedPropertyName.Substring("blendShape.".Length);
+                    cleanPropertyName = NormalizeText(cleanPropertyName);
                     if (!string.IsNullOrEmpty(cleanPropertyName))
                     {
                         discoveredPropertyNames.Add(cleanPropertyName);
                     }
                 }
-                else if (binding.propertyName.StartsWith("Blend Shape."))
+                else if (normalizedPropertyName.StartsWith("Blend Shape."))
                 {
                     // Extract just the property name after "Blend Shape."
-                    var cleanPropertyName = binding.propertyName.Substring("Blend Shape.".Length);
+                    var cleanPropertyName = normalizedPropertyName.Substring("Blend Shape.".Length);
+                    cleanPropertyName = NormalizeText(cleanPropertyName);
                     if (!string.IsNullOrEmpty(cleanPropertyName))
                     {
                         discoveredPropertyNames.Add(cleanPropertyName);
@@ -537,7 +771,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     }
     #endregion
 
-    #region Preview Operations - Fixed Implementation
+    #region Preview Operations - Fixed Implementation with Japanese Support
     private void PreviewChanges()
     {
         if (!ValidateInput()) return;
@@ -583,7 +817,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     }
 
     /// <summary>
-    /// Enhanced change info creation with proper matching logic
+    /// Enhanced change info creation with proper matching logic and Japanese support
     /// </summary>
     private PropertyChangeInfo CreatePropertyChangeInfo(AnimationClip clip, EditorCurveBinding binding)
     {
@@ -597,7 +831,8 @@ public class AnimationObjectPropertyRenamer : EditorWindow
             oldPath = binding.path,
             objectName = parsed.isValid ? GetCleanObjectName(parsed) : "",
             propertyName = parsed.isValid ? GetCleanPropertyName(parsed) : "",
-            middlePart = parsed.isValid ? parsed.middlePart : ""
+            middlePart = parsed.isValid ? parsed.middlePart : "",
+            textType = parsed.textType
         };
 
         bool matches = false;
@@ -609,10 +844,10 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         switch (renameTarget)
         {
             case RenameTarget.Object:
-                if (binding.path.Contains(fromValue))
+                if (TextContains(binding.path, fromValue, comparison))
                 {
-                    // Replace in the path directly, just like the reference script
-                    newPath = binding.path.Replace(fromValue, toValue);
+                    // Replace in the path directly with Japanese support
+                    newPath = TextReplace(binding.path, fromValue, toValue, comparison);
 
                     // Set display name for preview
                     changeInfo.objectName = fromValue;
@@ -621,14 +856,16 @@ public class AnimationObjectPropertyRenamer : EditorWindow
                 break;
 
             case RenameTarget.PropertyName:
-                // Check if this is a blend shape property and if it matches our search
-                if (binding.propertyName.StartsWith("blendShape."))
-                {
-                    var cleanPropertyName = binding.propertyName.Substring("blendShape.".Length);
+                var normalizedPropertyName = NormalizeText(binding.propertyName);
 
-                    if (cleanPropertyName.Equals(fromValue, comparison))
+                // Check if this is a blend shape property and if it matches our search
+                if (normalizedPropertyName.StartsWith("blendShape."))
+                {
+                    var cleanPropertyName = normalizedPropertyName.Substring("blendShape.".Length);
+
+                    if (TextEquals(cleanPropertyName, fromValue, comparison))
                     {
-                        newPropertyName = "blendShape." + toValue;
+                        newPropertyName = "blendShape." + NormalizeText(toValue);
                         changeInfo.propertyName = cleanPropertyName;
 
                         // Make oldPath and newPath different for display
@@ -638,13 +875,13 @@ public class AnimationObjectPropertyRenamer : EditorWindow
                         matches = true;
                     }
                 }
-                else if (binding.propertyName.StartsWith("Blend Shape."))
+                else if (normalizedPropertyName.StartsWith("Blend Shape."))
                 {
-                    var cleanPropertyName = binding.propertyName.Substring("Blend Shape.".Length);
+                    var cleanPropertyName = normalizedPropertyName.Substring("Blend Shape.".Length);
 
-                    if (cleanPropertyName.Equals(fromValue, comparison))
+                    if (TextEquals(cleanPropertyName, fromValue, comparison))
                     {
-                        newPropertyName = "Blend Shape." + toValue;
+                        newPropertyName = "Blend Shape." + NormalizeText(toValue);
                         changeInfo.propertyName = cleanPropertyName;
 
                         // Make oldPath and newPath different for display
@@ -701,8 +938,22 @@ public class AnimationObjectPropertyRenamer : EditorWindow
             return;
         }
 
-        // Enhanced validation for property names
-        if (changeInfo.newBinding.propertyName.IndexOfAny(new[] { ' ', ':', '\t', '\n', '/' }) >= 0 ||
+        // Enhanced validation for property names with Japanese support
+        var japaneseValidation = ValidateJapaneseText(changeInfo.newBinding.propertyName, out string japaneseMessage);
+        if (japaneseValidation == ValidationResult.Error)
+        {
+            changeInfo.validation = ValidationResult.Error;
+            changeInfo.validationMessage = japaneseMessage;
+            return;
+        }
+        else if (japaneseValidation == ValidationResult.Warning)
+        {
+            changeInfo.validation = ValidationResult.Warning;
+            changeInfo.validationMessage = japaneseMessage;
+        }
+
+        // Additional Unity-specific validation
+        if (changeInfo.newBinding.propertyName.IndexOfAny(new[] { '\t', '\n' }) >= 0 ||
             changeInfo.newBinding.propertyName.StartsWith(".") ||
             changeInfo.newBinding.propertyName.EndsWith("."))
         {
@@ -731,7 +982,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         a.path == b.path && a.propertyName == b.propertyName && a.type == b.type;
     #endregion
 
-    #region Main UI Framework
+    #region Main UI Framework with Japanese Support
     private void DrawMainInterface()
     {
         using (new EditorGUILayout.VerticalScope())
@@ -755,7 +1006,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         {
             using (new EditorGUILayout.HorizontalScope())
             {
-                GUILayout.Label("RΩKΔ's Animation Renamer", EditorStyles.largeLabel);
+                GUILayout.Label("RΩKΔ's Animation Renamer (JP+) (Japanese Support)", EditorStyles.largeLabel);
                 GUILayout.FlexibleSpace();
 
                 if (DrawIconButton("_Help", "Show/Hide Help", 24))
@@ -767,6 +1018,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
                 : "Rename PropertyName in 'OBJECT : Skinned Mesh Renderer.Blend Shape.PropertyName'";
 
             GUILayout.Label(description, EditorStyles.miniLabel);
+            GUILayout.Label("✨ Enhanced with Japanese character support (日本語対応)", EditorStyles.miniLabel);
 
             if (showHelp) DrawHelpSection();
         }
@@ -787,6 +1039,18 @@ public class AnimationObjectPropertyRenamer : EditorWindow
 
             EditorGUILayout.Space(3);
             EditorGUILayout.LabelField("⌨️ Shortcuts: Ctrl+D (Add clips) | Ctrl+P (Preview) | Ctrl+Enter (Apply)", EditorStyles.miniLabel);
+
+            EditorGUILayout.Space(3);
+            showJapaneseHelp = EditorGUILayout.Foldout(showJapaneseHelp, "🇯🇵 Japanese Character Support", true);
+            if (showJapaneseHelp)
+            {
+                EditorGUI.indentLevel++;
+                EditorGUILayout.LabelField("• Supports Hiragana (ひらがな), Katakana (カタカナ), Kanji (漢字)", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("• Unicode normalization for consistent matching", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("• Common Japanese blend shape patterns recognized", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("• Mixed Japanese/English text supported", EditorStyles.miniLabel);
+                EditorGUI.indentLevel--;
+            }
         }
     }
 
@@ -811,7 +1075,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         EditorGUILayout.Space(3);
     }
 
-    #region Configuration Panel
+    #region Configuration Panel with Japanese Options
     private void DrawConfigurationPanel()
     {
         using (new EditorGUILayout.VerticalScope("box"))
@@ -833,16 +1097,22 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         var fromLabel = renameTarget == RenameTarget.Object ? "From Object:" : "From Property:";
         var toLabel = renameTarget == RenameTarget.Object ? "To Object:" : "To Property:";
 
-        // From field with enhanced UI (removed paste button)
+        // From field with enhanced UI and Japanese support
         using (new EditorGUILayout.HorizontalScope())
         {
             EditorGUILayout.LabelField(fromLabel, GUILayout.Width(100));
 
-            var fromStyle = string.IsNullOrEmpty(fromValue) ? EditorStyles.textField :
-                (discoveredObjects.Contains(fromValue) || discoveredPropertyNames.Contains(fromValue)) ?
-                CreateTextFieldStyle(SUCCESS_COLOR) : CreateTextFieldStyle(WARNING_COLOR);
-
+            var fromStyle = GetTextFieldStyle(fromValue);
             fromValue = EditorGUILayout.TextField(fromValue, fromStyle);
+
+            // Show text type indicator
+            if (!string.IsNullOrEmpty(fromValue))
+            {
+                var textType = DetermineTextType(fromValue);
+                var typeColor = GetTextTypeColor(textType);
+                var typeLabel = GetTextTypeLabel(textType);
+                EditorGUILayout.LabelField(typeLabel, CreateLabelStyle(typeColor), GUILayout.Width(30));
+            }
 
             if (DrawIconButton("Refresh", "Clear field", 24))
             {
@@ -851,11 +1121,20 @@ public class AnimationObjectPropertyRenamer : EditorWindow
             }
         }
 
-        // To field (removed paste button)
+        // To field with Japanese support
         using (new EditorGUILayout.HorizontalScope())
         {
             EditorGUILayout.LabelField(toLabel, GUILayout.Width(100));
             toValue = EditorGUILayout.TextField(toValue);
+
+            // Show text type indicator
+            if (!string.IsNullOrEmpty(toValue))
+            {
+                var textType = DetermineTextType(toValue);
+                var typeColor = GetTextTypeColor(textType);
+                var typeLabel = GetTextTypeLabel(textType);
+                EditorGUILayout.LabelField(typeLabel, CreateLabelStyle(typeColor), GUILayout.Width(30));
+            }
 
             if (DrawIconButton("Refresh", "Clear field", 24))
             {
@@ -871,6 +1150,42 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         }
     }
 
+    private GUIStyle GetTextFieldStyle(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return EditorStyles.textField;
+
+        bool isDiscovered = discoveredObjects.Contains(text) || discoveredPropertyNames.Contains(text);
+        if (isDiscovered)
+            return CreateTextFieldStyle(SUCCESS_COLOR);
+
+        var textType = DetermineTextType(text);
+        return textType == TextType.Japanese ? CreateTextFieldStyle(JAPANESE_COLOR) :
+               CreateTextFieldStyle(WARNING_COLOR);
+    }
+
+    private Color GetTextTypeColor(TextType textType)
+    {
+        return textType switch
+        {
+            TextType.Japanese => JAPANESE_COLOR,
+            TextType.Mixed => new Color(0.8f, 0.6f, 0.9f),
+            TextType.Latin => Color.white,
+            _ => Color.gray
+        };
+    }
+
+    private string GetTextTypeLabel(TextType textType)
+    {
+        return textType switch
+        {
+            TextType.Japanese => "日",
+            TextType.Mixed => "混",
+            TextType.Latin => "En",
+            _ => "?"
+        };
+    }
+
     private void DrawAdvancedOptions()
     {
         showAdvanced = EditorGUILayout.Foldout(showAdvanced, "Advanced Options", true);
@@ -882,8 +1197,17 @@ public class AnimationObjectPropertyRenamer : EditorWindow
             EditorGUI.BeginChangeCheck();
 
             caseSensitive = EditorGUILayout.Toggle("Case Sensitive:", caseSensitive);
-
             autoPreview = EditorGUILayout.Toggle("Auto Preview:", autoPreview);
+
+            // Japanese-specific options
+            EditorGUILayout.Space(3);
+            EditorGUILayout.LabelField("Japanese Support", EditorStyles.boldLabel);
+            enableJapaneseNormalization = EditorGUILayout.Toggle("Unicode Normalization:", enableJapaneseNormalization);
+
+            if (!enableJapaneseNormalization)
+            {
+                EditorGUILayout.HelpBox("Disable only if experiencing issues. Normalization ensures consistent Japanese character handling.", MessageType.Info);
+            }
 
             if (EditorGUI.EndChangeCheck())
             {
@@ -916,22 +1240,34 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         EditorGUILayout.Space(3);
         EditorGUILayout.LabelField("Preview Transformation:", EditorStyles.boldLabel);
 
-        if (fromValue == toValue)
+        if (TextEquals(fromValue, toValue, System.StringComparison.OrdinalIgnoreCase))
         {
             EditorGUILayout.HelpBox("From and To values are identical - no changes will occur!", MessageType.Warning);
         }
         else
         {
+            var normalizedFrom = NormalizeText(fromValue);
+            var normalizedTo = NormalizeText(toValue);
+
             var example = renameTarget == RenameTarget.Object
-                ? $"{fromValue} : Skinned Mesh Renderer.Blend Shape.Example\n→\n{toValue} : Skinned Mesh Renderer.Blend Shape.Example"
-                : $"Example : Skinned Mesh Renderer.Blend Shape.{fromValue}\n→\nExample : Skinned Mesh Renderer.Blend Shape.{toValue}";
+                ? $"{normalizedFrom} : Skinned Mesh Renderer.Blend Shape.Example\n→\n{normalizedTo} : Skinned Mesh Renderer.Blend Shape.Example"
+                : $"Example : Skinned Mesh Renderer.Blend Shape.{normalizedFrom}\n→\nExample : Skinned Mesh Renderer.Blend Shape.{normalizedTo}";
 
             EditorGUILayout.LabelField(example, EditorStyles.helpBox);
+
+            // Show text type information
+            var fromType = DetermineTextType(fromValue);
+            var toType = DetermineTextType(toValue);
+            if (fromType != TextType.Latin || toType != TextType.Latin)
+            {
+                var typeInfo = $"Text types: {GetTextTypeLabel(fromType)} → {GetTextTypeLabel(toType)}";
+                EditorGUILayout.LabelField(typeInfo, EditorStyles.miniLabel);
+            }
         }
     }
     #endregion
 
-    #region Discovery Panel - Mode-Specific with Blend Shape Filtering
+    #region Discovery Panel with Japanese Filtering
     private void DrawDiscoveryPanel()
     {
         using (new EditorGUILayout.VerticalScope("box"))
@@ -956,7 +1292,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
             var modeText = renameTarget == RenameTarget.Object ? "Object discovery mode" : "Property discovery mode";
             EditorGUILayout.LabelField(modeText, EditorStyles.miniLabel);
 
-            // Search filter (removed Blend Shapes button)
+            // Search filter
             if (discoveredObjects.Count > 0 || discoveredPropertyNames.Count > 0)
             {
                 EditorGUILayout.Space(3);
@@ -1002,21 +1338,31 @@ public class AnimationObjectPropertyRenamer : EditorWindow
                 {
                     objectsScrollPos = scrollView.scrollPosition;
 
-                    var filtered = string.IsNullOrEmpty(searchFilter) ? discoveredObjects.OrderBy(x => x) :
-                        discoveredObjects.Where(x => x.Contains(searchFilter, System.StringComparison.OrdinalIgnoreCase)).OrderBy(x => x);
+                    var filtered = GetFilteredObjects();
 
                     foreach (var obj in filtered)
                     {
                         using (new EditorGUILayout.HorizontalScope())
                         {
                             var isSelected = obj == fromValue;
-                            var style = isSelected ? CreateLabelStyle(SUCCESS_COLOR) : EditorStyles.miniLabel;
+                            var textType = DetermineTextType(obj);
+                            var style = isSelected ? CreateLabelStyle(SUCCESS_COLOR) :
+                                       textType == TextType.Japanese ? CreateLabelStyle(JAPANESE_COLOR) :
+                                       EditorStyles.miniLabel;
 
                             if (GUILayout.Button(obj, style, GUILayout.ExpandWidth(true)))
                             {
                                 fromValue = obj;
                                 ClearPreview();
                                 GUI.FocusControl(null);
+                            }
+
+                            // Show text type indicator
+                            if (textType != TextType.Latin)
+                            {
+                                var typeLabel = GetTextTypeLabel(textType);
+                                var typeColor = GetTextTypeColor(textType);
+                                EditorGUILayout.LabelField(typeLabel, CreateLabelStyle(typeColor), GUILayout.Width(20));
                             }
                         }
                     }
@@ -1034,11 +1380,8 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     {
         using (new EditorGUILayout.VerticalScope("box", GUILayout.Width(position.width / 2 - 25)))
         {
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                showDiscoveredProperties = EditorGUILayout.Foldout(showDiscoveredProperties,
-                    $"Properties ({discoveredPropertyNames.Count})", true);
-            }
+            showDiscoveredProperties = EditorGUILayout.Foldout(showDiscoveredProperties,
+                $"Properties ({discoveredPropertyNames.Count})", true);
 
             if (showDiscoveredProperties && discoveredPropertyNames.Count > 0)
             {
@@ -1053,19 +1396,24 @@ public class AnimationObjectPropertyRenamer : EditorWindow
                         using (new EditorGUILayout.HorizontalScope())
                         {
                             var isSelected = prop == fromValue;
-                            var style = isSelected ? CreateLabelStyle(SUCCESS_COLOR) : EditorStyles.miniLabel;
-
-                            // Highlight blend shape properties with special color
-                            if (IsBlendShapePropertyName(prop))
-                            {
-                                style = isSelected ? CreateLabelStyle(SUCCESS_COLOR) : CreateLabelStyle(BLEND_SHAPE_COLOR);
-                            }
+                            var textType = DetermineTextType(prop);
+                            var style = isSelected ? CreateLabelStyle(SUCCESS_COLOR) :
+                                       textType == TextType.Japanese ? CreateLabelStyle(JAPANESE_COLOR) :
+                                       CreateLabelStyle(BLEND_SHAPE_COLOR);
 
                             if (GUILayout.Button(prop, style, GUILayout.ExpandWidth(true)))
                             {
                                 fromValue = prop;
                                 ClearPreview();
                                 GUI.FocusControl(null);
+                            }
+
+                            // Show text type indicator
+                            if (textType != TextType.Latin)
+                            {
+                                var typeLabel = GetTextTypeLabel(textType);
+                                var typeColor = GetTextTypeColor(textType);
+                                EditorGUILayout.LabelField(typeLabel, CreateLabelStyle(typeColor), GUILayout.Width(20));
                             }
                         }
                     }
@@ -1097,9 +1445,19 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         }
     }
 
-    /// <summary>
-    /// Gets filtered properties based on search criteria
-    /// </summary>
+    private System.Collections.Generic.IEnumerable<string> GetFilteredObjects()
+    {
+        if (string.IsNullOrEmpty(searchFilter))
+        {
+            return discoveredObjects.OrderBy(x => x);
+        }
+
+        var normalizedFilter = NormalizeText(searchFilter);
+        return discoveredObjects
+            .Where(x => TextContains(x, normalizedFilter, System.StringComparison.OrdinalIgnoreCase))
+            .OrderBy(x => x);
+    }
+
     private System.Collections.Generic.IEnumerable<string> GetFilteredProperties()
     {
         if (string.IsNullOrEmpty(searchFilter))
@@ -1107,37 +1465,14 @@ public class AnimationObjectPropertyRenamer : EditorWindow
             return discoveredPropertyNames.OrderBy(x => x);
         }
 
-        // Regular text filter
+        var normalizedFilter = NormalizeText(searchFilter);
         return discoveredPropertyNames
-            .Where(x => x.Contains(searchFilter, System.StringComparison.OrdinalIgnoreCase))
+            .Where(x => TextContains(x, normalizedFilter, System.StringComparison.OrdinalIgnoreCase))
             .OrderBy(x => x);
-    }
-
-    /// <summary>
-    /// Determines if a property name comes from a "Blend Shape." path
-    /// </summary>
-    private bool IsBlendShapePropertyName(string propertyName)
-    {
-        // Check if this property name appears in any "Blend Shape." path
-        foreach (var clip in selectedClips.Where(c => c != null))
-        {
-            foreach (var binding in AnimationUtility.GetCurveBindings(clip))
-            {
-                if (IsBlendShapeProperty(binding.path))
-                {
-                    var parsed = ParseAnimationPath(binding.path);
-                    if (parsed.isValid && GetCleanPropertyName(parsed) == propertyName)
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
     }
     #endregion
 
-    #region Action Bar & Preview Panel - Enhanced Implementation
+    #region Action Bar & Preview Panel
     private void DrawActionBar()
     {
         using (new EditorGUILayout.VerticalScope("box"))
@@ -1310,19 +1645,26 @@ public class AnimationObjectPropertyRenamer : EditorWindow
 
             EditorGUILayout.LabelField(statusIcon, iconStyle, GUILayout.Width(15));
 
-            // Change description - show FROM → TO
+            // Change description - show FROM → TO with Japanese support
             string changeText;
             if (renameTarget == RenameTarget.Object)
             {
-                changeText = $"{change.objectName} → {toValue}";
+                var normalizedFrom = NormalizeText(change.objectName);
+                var normalizedTo = NormalizeText(toValue);
+                changeText = $"{normalizedFrom} → {normalizedTo}";
             }
             else
             {
-                changeText = $"{change.propertyName} → {toValue}";
+                var normalizedFrom = NormalizeText(change.propertyName);
+                var normalizedTo = NormalizeText(toValue);
+                changeText = $"{normalizedFrom} → {normalizedTo}";
             }
 
-            // Increase width to prevent cutoff and show full FROM → TO
-            EditorGUILayout.LabelField(changeText, GUILayout.Width(200));
+            // Show text type if Japanese
+            var textType = DetermineTextType(changeText);
+            var textStyle = textType == TextType.Japanese ? CreateLabelStyle(JAPANESE_COLOR) : EditorStyles.label;
+
+            EditorGUILayout.LabelField(changeText, textStyle, GUILayout.Width(200));
 
             // Key count with more space
             EditorGUILayout.LabelField($"({change.curve.keys.Length} keys)", EditorStyles.miniLabel, GUILayout.Width(80));
@@ -1337,7 +1679,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     }
     #endregion
 
-    #region Apply Changes - Complete Implementation
+    #region Apply Changes - Complete Implementation with Japanese Support
     private void ApplyChanges()
     {
         if (!showPreview || !previewChanges.Any(p => p.WillChange))
@@ -1368,8 +1710,19 @@ public class AnimationObjectPropertyRenamer : EditorWindow
                                         .Select(p => p.clip).Distinct().Count();
 
         var targetText = renameTarget == RenameTarget.Object ? "object" : "property";
+        var normalizedFrom = NormalizeText(fromValue);
+        var normalizedTo = NormalizeText(toValue);
+
         var message = $"Apply {changeCount} {targetText} changes across {clipsAffected} clips?\n\n" +
-                     $"From: '{fromValue}' → To: '{toValue}'\n\n";
+                     $"From: '{normalizedFrom}' → To: '{normalizedTo}'\n\n";
+
+        // Show Japanese text type information
+        var fromType = DetermineTextType(fromValue);
+        var toType = DetermineTextType(toValue);
+        if (fromType != TextType.Latin || toType != TextType.Latin)
+        {
+            message += $"Text types: {GetTextTypeLabel(fromType)} → {GetTextTypeLabel(toType)}\n\n";
+        }
 
         message += backupStrategy switch
         {
@@ -1517,9 +1870,13 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     private void ShowOperationResults(OperationResult result)
     {
         var targetText = renameTarget == RenameTarget.Object ? "objects" : "properties";
+        var normalizedFrom = NormalizeText(fromValue);
+        var normalizedTo = NormalizeText(toValue);
+
         var message = $"Operation completed in {result.duration.TotalMilliseconds:F0}ms\n\n" +
                      $"✓ Clips processed: {result.successCount}\n" +
-                     $"✓ {targetText.Substring(0, 1).ToUpper()}{targetText.Substring(1)} renamed: {result.totalProperties - result.errors.Count}\n";
+                     $"✓ {targetText.Substring(0, 1).ToUpper()}{targetText.Substring(1)} renamed: {result.totalProperties - result.errors.Count}\n" +
+                     $"From: '{normalizedFrom}' → To: '{normalizedTo}'\n";
 
         if (result.warningCount > 0)
             message += $"⚠ Warnings: {result.warningCount}\n";
@@ -1792,7 +2149,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     }
     #endregion
 
-    #region Input & Validation
+    #region Input & Validation with Japanese Support
     private bool ValidateInput()
     {
         if (string.IsNullOrEmpty(fromValue))
@@ -1809,9 +2166,25 @@ public class AnimationObjectPropertyRenamer : EditorWindow
             return false;
         }
 
-        if (fromValue == toValue)
+        if (TextEquals(fromValue, toValue, System.StringComparison.OrdinalIgnoreCase))
         {
             EditorUtility.DisplayDialog("Invalid Input", "From and To values cannot be the same.", "OK");
+            return false;
+        }
+
+        // Validate Japanese text
+        var fromValidation = ValidateJapaneseText(fromValue, out string fromMessage);
+        var toValidation = ValidateJapaneseText(toValue, out string toMessage);
+
+        if (fromValidation == ValidationResult.Error)
+        {
+            EditorUtility.DisplayDialog("Invalid From Value", fromMessage, "OK");
+            return false;
+        }
+
+        if (toValidation == ValidationResult.Error)
+        {
+            EditorUtility.DisplayDialog("Invalid To Value", toMessage, "OK");
             return false;
         }
 
@@ -1819,7 +2192,8 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     }
 
     private bool CanPreview() => selectedClips.Count > 0 && !string.IsNullOrEmpty(fromValue) &&
-                                !string.IsNullOrEmpty(toValue) && fromValue != toValue &&
+                                !string.IsNullOrEmpty(toValue) &&
+                                !TextEquals(fromValue, toValue, System.StringComparison.OrdinalIgnoreCase) &&
                                 currentState == OperationState.Idle;
 
     private bool CanApply() => showPreview && previewChanges.Any(p => p.WillChange) &&
@@ -1933,7 +2307,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     }
     #endregion
 
-    #region Preferences
+    #region Preferences with Japanese Support
     private void LoadPreferences()
     {
         renameTarget = (RenameTarget)EditorPrefs.GetInt($"{PREF_PREFIX}RenameTarget", 1);
@@ -1942,6 +2316,8 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         autoPreview = EditorPrefs.GetBool($"{PREF_PREFIX}AutoPreview", true);
         showAdvanced = EditorPrefs.GetBool($"{PREF_PREFIX}ShowAdvanced", false);
         selectedTabIndex = EditorPrefs.GetInt($"{PREF_PREFIX}SelectedTab", 1);
+        enableJapaneseNormalization = EditorPrefs.GetBool($"{PREF_PREFIX}JapaneseNormalization", true);
+        showJapaneseHelp = EditorPrefs.GetBool($"{PREF_PREFIX}ShowJapaneseHelp", false);
     }
 
     private void SavePreferences()
@@ -1952,6 +2328,8 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         EditorPrefs.SetBool($"{PREF_PREFIX}AutoPreview", autoPreview);
         EditorPrefs.SetBool($"{PREF_PREFIX}ShowAdvanced", showAdvanced);
         EditorPrefs.SetInt($"{PREF_PREFIX}SelectedTab", selectedTabIndex);
+        EditorPrefs.SetBool($"{PREF_PREFIX}JapaneseNormalization", enableJapaneseNormalization);
+        EditorPrefs.SetBool($"{PREF_PREFIX}ShowJapaneseHelp", showJapaneseHelp);
     }
     #endregion
 }

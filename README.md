@@ -1,0 +1,1 @@
+# unity-anim-prefix-suffix-batch-renamer

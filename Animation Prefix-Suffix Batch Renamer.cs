@@ -295,12 +295,12 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     #endregion
 
     #region Menu Integration
-    [MenuItem("Tools/RΩKΔ's Animation Renamer (JP+)", false, 0)]
+    [MenuItem("Tools/RΩKΔ's Animation Renamer", false, 0)]
     public static AnimationObjectPropertyRenamer ShowWindow()
     {
-        var window = GetWindow<AnimationObjectPropertyRenamer>("RΩKΔ's Animation Renamer (JP+)");
+        var window = GetWindow<AnimationObjectPropertyRenamer>("RΩKΔ's Animation Renamer");
         window.minSize = new Vector2(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
-        window.titleContent = new GUIContent("RΩKΔ's Animation Renamer (JP+)", EditorGUIUtility.IconContent("AnimationClip Icon").image);
+        window.titleContent = new GUIContent("RΩKΔ's Animation Renamer", EditorGUIUtility.IconContent("AnimationClip Icon").image);
         window.Show();
         return window;
     }
@@ -311,7 +311,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
     [MenuItem("Assets/Rename Animation Objects & Properties", false, 25)]
     private static void ShowFromContextMenu()
     {
-        var window = GetWindow<AnimationObjectPropertyRenamer>("RΩKΔ's Animation Renamer (JP+)");
+        var window = GetWindow<AnimationObjectPropertyRenamer>("RΩKΔ's Animation Renamer");
         window.AddSelectedClipsFromProject();
     }
     #endregion
@@ -1006,7 +1006,7 @@ public class AnimationObjectPropertyRenamer : EditorWindow
         {
             using (new EditorGUILayout.HorizontalScope())
             {
-                GUILayout.Label("RΩKΔ's Animation Renamer (JP+) (Japanese Support)", EditorStyles.largeLabel);
+                GUILayout.Label("RΩKΔ's Animation Renamer", EditorStyles.largeLabel);
                 GUILayout.FlexibleSpace();
 
                 if (DrawIconButton("_Help", "Show/Hide Help", 24))

@@ -1,0 +1,23 @@
+{
+  "name": "com.roka.animation-toolkit",
+  "displayName": "RΩKΔ's Animation Toolkit",
+  "version": "1.0.0",
+  "description": "Unity editor tools for animation clip management for transfering between avatars",
+  "author": {
+    "name": "RΩKΔ"
+  },
+  "keywords": [
+    "anim",
+    "animation",
+    "vrchat",
+    "editor",
+    "english",
+    "japanese",
+    "batch"
+  ],
+  "license": "MIT",
+  "unity": "2022.3.22f1",
+  "vpmDependencies": {},
+  "legacyFolders": {},
+  "legacyFiles": {}
+}
